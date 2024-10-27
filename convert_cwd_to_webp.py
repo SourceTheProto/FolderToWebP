@@ -3,7 +3,7 @@ import shutil
 from os import listdir
 from os.path import isfile, join
 from subprocess import Popen, TimeoutExpired, DEVNULL, STDOUT, PIPE
-from threading import Thread, current_thread, active_count
+from threading import Thread, current_thread
 from sys import stdout, argv
 from time import localtime, sleep
 from queue import SimpleQueue, Empty
@@ -24,19 +24,20 @@ OPTIONS:
     --list-md - same as --list but checks for extra metadata
     --mdtest <IMAGE> - Tests if provided image has extra metadata
     --(no-)force-metadata - Forces metadata to be transferred (or not to be), skipping check
-    --no-remove-original - leaves converted image in 'WebPs' folder and doesn't replace (only applicable for -s)
+    --remove-original - removes original image and moves converted image into place (only applicable for -s)
     --nolog - doesn't make log files\n"""
 
-DEFAULT_TAGS = ['ExifTool Version',
+DEFAULT_TAGS = ['ExifTool Version Number',
                 'File Name',
                 'Directory',
                 'File Size',
-                'File Modification',
-                'File Access',
-                'File Creation',
+                'File Modification Date/Time',
+                'File Access Date/Time',
+                'File Creation Date/Time',
                 'File Permissions',
                 'File Type',
-                'MIME',
+                'File Type Extension',
+                'MIME Type',
                 'Image Width',
                 'Image Height',
                 'Bit Depth',
@@ -106,28 +107,28 @@ def LogToFile(logLevel: int, file: str) -> None:
             logfile.write("FAILED\n")
 
 def LogToSTDOut(logLevel: int, file: str) -> None:
-    global LogQueue
+    global G_logQueue
     if logLevel == 0:
-        LogQueue.put(f"Converting {file}...")
+        G_logQueue.put(f"Converting {file}...")
     elif logLevel == 1:
-        LogQueue.put(f"Getting EXIF data from {file}...")
+        G_logQueue.put(f"Getting EXIF data from {file}...")
     elif logLevel == 2:
-        LogQueue.put(f"Merging EXIF data to {file[:-4:]}.webp...")
+        G_logQueue.put(f"Merging EXIF data to {file[:-4:]}.webp...")
     elif logLevel == 3:
-        LogQueue.put(f"FINISHED {file}")
+        G_logQueue.put(f"FINISHED {file}")
     elif logLevel == 4:
-        LogQueue.put(f"FAILED WORK ON {file}")
+        G_logQueue.put(f"FAILED WORK ON {file}")
 
 def LogTail():
     global LOG_TO_STDOUT
-    global LogQueue
+    global G_logQueue
     global NUM_THREADS
-    global THREADS_DONE_COUNT
+    global G_threadsDone
     if not LOG_TO_STDOUT: return
     
-    while THREADS_DONE_COUNT != NUM_THREADS:
+    while G_threadsDone != NUM_THREADS:
         try:
-            stdout.write(f"{LogQueue.get(block=True, timeout=0.1)}\n")
+            stdout.write(f"{G_logQueue.get(block=True, timeout=0.1)}\n")
         except Empty:
             sleep(0.1)
 
@@ -144,8 +145,8 @@ def RunShell_sync(args: list[str]) -> int:
     return ret.returncode
 
 def CheckIfMetadata(filename: str) -> bool:
-    if forceMD != None:
-        return forceMD
+    if G_forceMD != None:
+        return G_forceMD
     proc = Popen([shutil.which("exiftool"), filename], stdout=PIPE)
     try:
         output = proc.communicate(timeout=5)[0]
@@ -181,13 +182,13 @@ def MetadataCheck(filename: str) -> str:
             stdout.write(f"NOT DEFAULT: {line}\n")
 
 def ConversionWorker(images: list):
-    global THREADS_DONE_COUNT
+    global G_threadsDone
     for inFile in images:
         ConvertSingleImage(inFile)
-    THREADS_DONE_COUNT += 1
+    G_threadsDone += 1
 
 def ConvertSingleImage(image: str) -> str: 
-    global imagesDone
+    global G_imagesDone
     outFile = "WebPs" + os.sep + GetFilename(image) + ".webp"
     
     # Convert image
@@ -201,7 +202,7 @@ def ConvertSingleImage(image: str) -> str:
     
     if CheckIfMetadata(image):
         TransferMetadata(image, outFile)
-    imagesDone += 1
+    G_imagesDone += 1
     return outFile
 
 def TransferMetadata(image: str, outFile: str):
@@ -235,8 +236,8 @@ def CollectFiles(directory: str, extensions: tuple[str]) -> list[str]:
     return filenameList
 
 def ProcessCmdOptions():
-    global forceMD
-    global collectFormats
+    global G_forceMD
+    global G_collectFormats
     global NUM_THREADS
     
     if ("--help" in argv) or ("-h" in argv):
@@ -244,16 +245,16 @@ def ProcessCmdOptions():
         exit()
 
     if "--force-metadata" in argv:
-        forceMD = True
+        G_forceMD = True
     if "--no-force-metadata" in argv:
-        forceMD = False
+        G_forceMD = False
     
     if "--mdtest" in argv:
         MetadataCheck(argv[2])
         exit()
     
     if "--no-ignore-webp" in argv:
-        collectFormats = ("png", "tiff", "tif", "tga", "webp")
+        G_collectFormats = ("png", "tiff", "tif", "tga", "webp")
     
     # Options that take in arguments
     for i in range(len(argv)):
@@ -311,17 +312,17 @@ NUM_THREADS = 0
 # 1 - log to stdout
 LOG_TO_STDOUT = False
 LOGGING_DIR = ""
-LogQueue = SimpleQueue()
-forceMD = None
-collectFormats = ("png", "tiff", "tif", "tga")
-imagesDone = 0
-THREADS_DONE_COUNT = 0
+G_logQueue = SimpleQueue()
+G_forceMD = None
+G_collectFormats = ("png", "tiff", "tif", "tga")
+G_imagesDone = 0
+G_threadsDone = 0
 
 if __name__ == '__main__':
     
     ProcessCmdOptions()
     
-    srcImages = CollectFiles(".", collectFormats)
+    srcImages = CollectFiles(".", G_collectFormats)
     
     if "--list-md" in argv:
         PrintImageData(srcImages, True)
@@ -347,9 +348,9 @@ if __name__ == '__main__':
         MakeDir('xmpdata_tmp')
         outFile = ConvertSingleImage(filename)
         shutil.rmtree('xmpdata_tmp')
+        shutil.copy2(outFile, ".")
         
-        if not "--no-remove-original" in argv:
-            shutil.copy2(outFile, ".")
+        if "--remove-original" in argv:
             os.remove(argv[argument])
 
         if len(listdir('WebPs')) <= 1:
@@ -403,10 +404,10 @@ if __name__ == '__main__':
     
     LogTail()
     
-    while THREADS_DONE_COUNT != NUM_THREADS:
-        stdout.write(f"\x1b[1K\r Converting Image ({imagesDone}/{len(srcImages)})")
+    while G_threadsDone != NUM_THREADS:
+        stdout.write(f"\x1b[1K\rConverting Image ({G_imagesDone}/{len(srcImages)})")
         sleep(0.1)
-    stdout.write(f"\x1b[1K\r Converting Image ({len(srcImages)}/{len(srcImages)})")
+    stdout.write(f"\x1b[1K\rConverting Image ({len(srcImages)}/{len(srcImages)})\n")
         
 
     for thread in threadPool:
@@ -416,10 +417,10 @@ if __name__ == '__main__':
     if "--recover" in argv:
         outFiles = CollectFiles("WebPs", ("webp"))
         fuckedMD = []
-        imagesDone = 0
+        G_imagesDone = 0
         for dstImg in outFiles:
-            imagesDone += 1
-            stdout.write(f"\x1b[1K\r Checking image metadata... ({imagesDone}/{len(outFiles)})")
+            G_imagesDone += 1
+            stdout.write(f"\x1b[1K\r Checking image metadata... ({G_imagesDone}/{len(outFiles)})")
             if not CheckIfMetadata(dstImg):
                 fuckedMD.append(dstImg)
         
@@ -433,11 +434,11 @@ if __name__ == '__main__':
         else:
             srcFiles = CollectFiles(".", ("png", "tiff", "tif", "tga"))
         
-        imagesDone = 0
+        G_imagesDone = 0
         for img in fuckedMD:
             for i in range(len(srcFiles)):
-                imagesDone += 1
-                stdout.write(f"\x1b[1K\r Checking image metadata... ({imagesDone}/{len(fuckedMD)})")
+                G_imagesDone += 1
+                stdout.write(f"\x1b[1K\r Checking image metadata... ({G_imagesDone}/{len(fuckedMD)})")
                 if GetFilename(img) != GetFilename(srcFiles[i]): continue
                 if not CheckIfMetadata(srcFiles[i]):
                     fuckedMD.remove(img)

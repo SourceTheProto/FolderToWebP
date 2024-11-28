@@ -155,15 +155,18 @@ def CheckIfMetadata(filename: str) -> bool:
         return False
     
     global DEFAULT_TAGS
-    for line in output.decode('utf-8').split(os.linesep):
-        isDefault = False
-        for tag in DEFAULT_TAGS:
-            if (line.startswith(tag)):
-                isDefault = True
-                break
-        if not isDefault and line != '':
-            return True
-    return False
+    try:
+        for line in output.decode('utf-8').split(os.linesep):
+            isDefault = False
+            for tag in DEFAULT_TAGS:
+                if (line.startswith(tag)):
+                    isDefault = True
+                    break
+            if not isDefault and line != '':
+                return True
+        return False
+    except UnicodeDecodeError:
+        return True
 
 def MetadataCheck(filename: str) -> str:
     proc = Popen([shutil.which("exiftool"), filename], stdout=PIPE)

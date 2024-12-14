@@ -63,7 +63,7 @@ def MakeDir(dirname: str) -> None:
 def InitLogSystem() -> None:
     global LOG_TO_STDOUT
     global LOGGING_DIR
-    LOGGING_DIR = f"WebpLogs{os.sep}{localtime().tm_mon}-{localtime().tm_mday}_{localtime().tm_hour}-{localtime().tm_min}-{localtime().tm_sec}"
+    LOGGING_DIR = f"WebpLogs{os.sep}{localtime().tm_year}-{localtime().tm_mon}-{localtime().tm_mday}_{localtime().tm_hour}-{localtime().tm_min}-{localtime().tm_sec}"
     root = os.getcwd()
     try:
         for dir in LOGGING_DIR.split(os.sep):
@@ -234,7 +234,7 @@ def CollectFiles(directory: str, extensions: tuple[str]) -> list[str]:
     
     if directory != ".":
         for i in range(len(filenameList)):        
-            filenameList[i] = directory + os.sep + filenameList[i]
+            filenameList[i] = join(directory, filenameList[i])
     
     return filenameList
 

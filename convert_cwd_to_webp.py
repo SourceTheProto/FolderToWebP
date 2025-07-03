@@ -7,6 +7,7 @@ from threading import Thread, current_thread
 from sys import stdout, argv
 from time import localtime, sleep
 from queue import SimpleQueue, Empty
+from send2trash import send2trash
 
 USAGE_TEXT = """\
 Usage:
@@ -23,8 +24,9 @@ OPTIONS:
     --list - lists all files to be converted and quit
     --list-md - same as --list but checks for extra metadata
     --mdtest <IMAGE> - Tests if provided image has extra metadata
-    --(no-)force-metadata - Forces metadata to be transferred (or not to be), skipping check
-    --remove-original - removes original image and moves converted image into place (only applicable for -s)
+    --(no-)force(-no)-metadata - Forces metadata to be transferred (or not to be), skipping check
+    --remove-original - removes original image and moves converted image into place (only -s)
+    --no-replace-originals - leaves all webps in the webps folder and leaves all original files alone (without -s)
     --nolog - doesn't make log files\n"""
 
 DEFAULT_TAGS = ['ExifTool Version Number',
@@ -48,7 +50,7 @@ DEFAULT_TAGS = ['ExifTool Version Number',
                 'Image Size',
                 'Megapixels']
 
-def MakeDir(dirname: str) -> None:
+def mkdir_wrapper(dirname: str) -> None:
     try:
         os.mkdir(dirname)
     except FileExistsError:
@@ -61,7 +63,6 @@ def MakeDir(dirname: str) -> None:
         exit()
 
 def InitLogSystem() -> None:
-    global LOG_TO_STDOUT
     global LOGGING_DIR
     LOGGING_DIR = f"WebpLogs{os.sep}{localtime().tm_year}-{localtime().tm_mon}-{localtime().tm_mday}_{localtime().tm_hour}-{localtime().tm_min}-{localtime().tm_sec}"
     root = os.getcwd()
@@ -72,66 +73,22 @@ def InitLogSystem() -> None:
             except FileExistsError:
                 pass
             os.chdir(dir)
-        LOG_TO_STDOUT = False
         stdout.write("Log system initialized successfully\n")
     except OSError:
-        stdout.write(f"\nLog folder could not be created, will be logging to stdout\n")
-        LOG_TO_STDOUT = True
+        stdout.write(f"\nLog folder could not be created, stoppping...\n")
+        exit()
     finally:
         os.chdir(root)
 
-def WriteLog(logLevel: int, file: str) -> None:
-    # Loglevel is like an enum
-    # 0 - starting convert
-    # 1 - starting exif transfer out
-    # 2 - starting exif transfer in
-    # 3 - operation finished
-    # 4 - operation failed
+def WriteLog(logString: str) -> None:
     if LOGGING_DIR == "": return
-    if LOG_TO_STDOUT:
-        return LogToSTDOut(logLevel, file)
-    else:
-        return LogToFile(logLevel, file)
-
-def LogToFile(logLevel: int, file: str) -> None:
     with open(f"{LOGGING_DIR}{os.sep}{current_thread().name}.log", "a") as logfile:
-        if logLevel == 0:
-            logfile.write(f"Converting {file}...")
-        elif logLevel == 1:
-            logfile.write("Getting EXIF data...")
-        elif logLevel == 2:
-            logfile.write("Merging EXIF data...")
-        elif logLevel == 3:
-            logfile.write("FINISHED\n")
-        elif logLevel == 4:
-            logfile.write("FAILED\n")
+        logfile.write(logString)
 
-def LogToSTDOut(logLevel: int, file: str) -> None:
-    global G_logQueue
-    if logLevel == 0:
-        G_logQueue.put(f"Converting {file}...")
-    elif logLevel == 1:
-        G_logQueue.put(f"Getting EXIF data from {file}...")
-    elif logLevel == 2:
-        G_logQueue.put(f"Merging EXIF data to {file[:-4:]}.webp...")
-    elif logLevel == 3:
-        G_logQueue.put(f"FINISHED {file}")
-    elif logLevel == 4:
-        G_logQueue.put(f"FAILED WORK ON {file}")
-
-def LogTail():
-    global LOG_TO_STDOUT
-    global G_logQueue
-    global NUM_THREADS
-    global G_threadsDone
-    if not LOG_TO_STDOUT: return
-    
-    while G_threadsDone != NUM_THREADS:
-        try:
-            stdout.write(f"{G_logQueue.get(block=True, timeout=0.1)}\n")
-        except Empty:
-            sleep(0.1)
-
+# Used for debug of the system determining what
+# metadata was determined to be "extra". Can be
+# used to check other images to see if they
+# would get their metadata transfered.
 def PrintImageData(imgList: list, checkMD: bool) -> None:
     for img in imgList:
         stdout.write(f"\t{img}")
@@ -139,20 +96,31 @@ def PrintImageData(imgList: list, checkMD: bool) -> None:
             stdout.write(" + Extra Data")
         stdout.write("\n")
 
-def RunShell_sync(args: list[str]) -> int:
-    ret = Popen(args, stdout=DEVNULL, stderr=STDOUT)
+def RunShellsync(args: list[str], hideStdout: bool) -> int:
+    if hideStdout:
+        ret = Popen(args, stdout=DEVNULL, stderr=STDOUT)
+    else:
+        ret = Popen(args)
     ret.wait()
     return ret.returncode
 
 def CheckIfMetadata(filename: str) -> bool:
-    if G_forceMD != None:
-        return G_forceMD
-    proc = Popen([shutil.which("exiftool"), filename], stdout=PIPE)
+    WriteLog("hasMetadata,")
+    
+    global G_forceMD
+    if G_forceMD == True:
+        WriteLog("TRUE\n")
+        return True
+    elif G_forceMD == False:
+        WriteLog("FALSE\n")
+        return False
+    
+    proc = Popen(["exiftool", filename], stdout=PIPE)
     try:
         output = proc.communicate(timeout=5)[0]
     except TimeoutExpired:
-        WriteError(3, filename)
-        return False
+        WriteLog("TIMEOUT_ERROR\n")
+        return True
     
     global DEFAULT_TAGS
     try:
@@ -163,13 +131,16 @@ def CheckIfMetadata(filename: str) -> bool:
                     isDefault = True
                     break
             if not isDefault and line != '':
+                WriteLog("TRUE\n")
                 return True
+        WriteLog("FALSE\n")
         return False
     except UnicodeDecodeError:
+        WriteLog("UNICODE_ERROR\n")
         return True
 
 def MetadataCheck(filename: str) -> str:
-    proc = Popen([shutil.which("exiftool"), filename], stdout=PIPE)
+    proc = Popen(["exiftool", filename], stdout=PIPE)
     output = proc.communicate(timeout=3)[0]
     
     global DEFAULT_TAGS
@@ -194,17 +165,20 @@ def ConvertSingleImage(image: str) -> str:
     global G_imagesDone
     outFile = "WebPs" + os.sep + GetFilename(image) + ".webp"
     
+    if current_thread().name != "MainThread": hideStdout: bool = True
+    else: hideStdout: bool = False
+    
     # Convert image
-    WriteLog(0, image)
-    ret = RunShell_sync([shutil.which("cwebp"), "-lossless", "-metadata", "icc", "-mt", "-z", "9", "-alpha_filter", "best", "-progress", "-exact", image, "-o", outFile])
+    WriteLog(f"converting,{image},")
+    ret = RunShellsync(["cwebp", "-lossless", "-metadata", "icc", "-mt", "-z", "9", "-alpha_filter", "best", "-progress", "-exact", image, "-o", outFile], hideStdout)
     if ret != 0:
-        WriteLog(4, image)
-        WriteError(0, image)
+        WriteLog("FAIL\n")
         return ""
-    WriteLog(3, image)
+    WriteLog("SUCCESS\n")
     
     if CheckIfMetadata(image):
         TransferMetadata(image, outFile)
+    
     G_imagesDone += 1
     return outFile
 
@@ -212,22 +186,20 @@ def TransferMetadata(image: str, outFile: str):
     xmpFile = "xmpdata_tmp" + os.sep + GetFilename(image) + ".xmp"
     
     # transferring old EXIF data to tmp XMP file
-    WriteLog(1, image)
-    ret = RunShell_sync([shutil.which("exiftool"), "-u", "-U", "-P", "-a", "-z", "-tagsFromFile", image, xmpFile])
+    WriteLog("getMetadata,")
+    ret = RunShellsync(["exiftool", "-u", "-U", "-P", "-a", "-z", "-tagsFromFile", image, xmpFile], True)
     if ret != 0:
-        WriteLog(4, image)
-        WriteError(1, image)
+        WriteLog("FAIL\n")
         return outFile
-    WriteLog(3, image)
+    WriteLog("SUCCESS\n")
     
     # transferring tmp XMP data back to converted image
-    WriteLog(2, image)
-    ret = RunShell_sync([shutil.which("webpmux"), "-set", "xmp", xmpFile, outFile, "-o", outFile])
+    WriteLog("writeMetadata,")
+    ret = RunShellsync(["webpmux", "-set", "xmp", xmpFile, outFile, "-o", outFile], True)
     if ret != 0:
-        WriteLog(4, image)
-        WriteError(2, image)
+        WriteLog("FAIL\n")
         return outFile
-    WriteLog(3, image)
+    WriteLog("SUCCESS\n")
 
 def CollectFiles(directory: str, extensions: tuple[str]) -> list[str]:
     filenameList = [file for file in listdir(directory) if isfile(join(directory, file)) and (file.endswith(extensions))]
@@ -240,6 +212,7 @@ def CollectFiles(directory: str, extensions: tuple[str]) -> list[str]:
 
 def ProcessCmdOptions():
     global G_forceMD
+    global G_AutoReplace
     global G_collectFormats
     global NUM_THREADS
     
@@ -249,8 +222,11 @@ def ProcessCmdOptions():
 
     if "--force-metadata" in argv:
         G_forceMD = True
-    if "--no-force-metadata" in argv:
+    if "--force-no-metadata" in argv:
         G_forceMD = False
+
+    if "--autoreplace":
+        G_AutoReplace = True
     
     if "--mdtest" in argv:
         MetadataCheck(argv[2])
@@ -280,7 +256,29 @@ def ProcessCmdOptions():
                 else: exit()
     
     if NUM_THREADS == 0:
-        NUM_THREADS = 6
+        NUM_THREADS = 8
+
+def SingleMode():
+    for i in range(len(argv)):
+            if argv[i] in ("--single", "-s"):
+                argument = i + 1
+    if os.path.dirname(argv[argument]) != '':
+        os.chdir(os.path.dirname(argv[argument]))
+    
+    filePath = argv[argument].split(os.sep)
+    filename = filePath[len(filePath)-1]
+    mkdir_wrapper('WebPs')
+    mkdir_wrapper('xmpdata_tmp')
+    outFile = ConvertSingleImage(filename)
+    shutil.rmtree('xmpdata_tmp')
+    shutil.copy2(outFile, ".")
+    
+    if "--remove-original" in argv:
+        os.remove(argv[argument])
+
+    if len(listdir('WebPs')) <= 1:
+        shutil.rmtree('WebPs')
+    exit()
 
 def GetFilename(file: str) -> str:
     if file[-4::] in ("webp", "tiff"):
@@ -291,35 +289,94 @@ def GetFilename(file: str) -> str:
     if not os.sep in file: return file[:extLength:]
     else: return file.split(os.sep)[len(file.split(os.sep))-1][:extLength:]
 
-def WriteError(issueType: int, image: str):
-    # issueType: enum
-    # 0 - file conversion error
-    # 1 - metadata extraction error
-    # 2 - metadata insertion error
-    # 3 - metadata detection error
-    global LOGGING_DIR
-    with open(f"{LOGGING_DIR}{os.sep}ErrorFiles.txt", "at") as errorLog:
-        if issueType == 0:
-            errorLog.write(f"{image} CONVERSION ERROR\n")
-        elif issueType == 1:
-            errorLog.write(f"{image} METADATA EXTRACTION ERROR\n")
-        elif issueType == 2:
-            errorLog.write(f"{image} METADATA INSERTIONS ERROR\n")
-        elif issueType == 3:
-            errorLog.write(f"{image} METADATA DETECTION ERROR\n")
+def RecoverPt1() -> None:
+    dstImages = CollectFiles("WebPs", ("webp"))
+    
+    for i in range(len(dstImages)):
+        dstImages[i] = GetFilename(dstImages[i])
+    
+    toRemove = []
+    
+    for i in range(len(srcImages)):
+        
+        if GetFilename(srcImages[i]) in dstImages:
+            toRemove.append(srcImages[i])
+    
+    for img in toRemove:
+        try:
+            srcImages.remove(img)
+        except ValueError: pass
+    
+    if len(srcImages) == 0:
+        stdout.write("All images converted successfully.\n")
+    else:
+        stdout.write(f"Found {len(srcImages)} images that failed to convert\n")
 
-NUM_THREADS = 0
+def RecoverPt2() -> None:
+    outFiles = CollectFiles("WebPs", ("webp"))
+    fuckedMD = []
+    G_imagesDone = 0
+    for dstImg in outFiles:
+        G_imagesDone += 1
+        stdout.write(f"\x1b[1K\r Checking image metadata... ({G_imagesDone}/{len(outFiles)})")
+        if not CheckIfMetadata(dstImg):
+            fuckedMD.append(dstImg)
+    
+    if len(fuckedMD) != 0:
+        stdout.write("\nThere is no metadata to recover.")
+        shutil.rmtree('xmpdata_tmp')
+        exit()
+    
+    if "--no-ignore-webp" in argv:
+        srcFiles = CollectFiles(".", ("png", "webp", "tiff", "tif", "tga"))
+    else:
+        srcFiles = CollectFiles(".", ("png", "tiff", "tif", "tga"))
+    
+    G_imagesDone = 0
+    for img in fuckedMD:
+        for i in range(len(srcFiles)):
+            G_imagesDone += 1
+            stdout.write(f"\x1b[1K\r Checking image metadata... ({G_imagesDone}/{len(fuckedMD)})")
+            if GetFilename(img) != GetFilename(srcFiles[i]): continue
+            if not CheckIfMetadata(srcFiles[i]):
+                fuckedMD.remove(img)
+    
+    if len(fuckedMD) == 0:
+        stdout.write("\nThere is no metadata to recover.")
+        shutil.rmtree('xmpdata_tmp')
+        exit()
+    
+    doneCount = 0
+    for outImage in fuckedMD:
+        for i in range(len(srcFiles)):
+            if GetFilename(outImage) != GetFilename(srcFiles[i]): continue
+            inImage = srcFiles[i]
+        doneCount += 1
+        stdout.write(f"\x1b[1K\rTransferring metadata...({doneCount}/{len(fuckedMD)})")
+        TransferMetadata(inImage, outImage)
 
-# Controls the method that logging functions use to log behavior
-# 0 - log to files
-# 1 - log to stdout
-LOG_TO_STDOUT = False
-LOGGING_DIR = ""
-G_logQueue = SimpleQueue()
-G_forceMD = None
-G_collectFormats = ("png", "tiff", "tif", "tga")
-G_imagesDone = 0
-G_threadsDone = 0
+def AutoReplace() -> None:
+    logFiles = CollectFiles(LOGGING_DIR, ("log"))
+    combinedLogFile = open(f"{LOGGING_DIR}{os.sep}combinedLog.txt", "a")
+    
+    for logfilename in logFiles:
+        with open(logfilename, "r") as logfile:
+            combinedLogFile.write(logfile.read())
+    
+    combinedLogFile.close()
+    combinedLogFile = open(f"{LOGGING_DIR}{os.sep}combinedLog.txt", "r")
+    
+    # Parse file for errors
+        
+
+NUM_THREADS: int = 0
+LOGGING_DIR: str = ""
+
+G_forceMD: bool|None = None
+G_AutoReplace: bool = False
+G_collectFormats: tuple[str] = ("png", "tiff", "tif", "tga")
+G_imagesDone: int = 0
+G_threadsDone: int = 0
 
 if __name__ == '__main__':
     
@@ -339,50 +396,11 @@ if __name__ == '__main__':
         InitLogSystem()
 
     if ("--single" in argv) or ("-s" in argv):
-        for i in range(len(argv)):
-            if argv[i] in ("--single", "-s"):
-                argument = i + 1
-        if os.path.dirname(argv[argument]) != '':
-            os.chdir(os.path.dirname(argv[argument]))
-        
-        filePath = argv[argument].split(os.sep)
-        filename = filePath[len(filePath)-1]
-        MakeDir('WebPs')
-        MakeDir('xmpdata_tmp')
-        outFile = ConvertSingleImage(filename)
-        shutil.rmtree('xmpdata_tmp')
-        shutil.copy2(outFile, ".")
-        
-        if "--remove-original" in argv:
-            os.remove(argv[argument])
-
-        if len(listdir('WebPs')) <= 1:
-            shutil.rmtree('WebPs')
-        exit()
+        SingleMode()
 
     # Recovery Part I - failed images
     if "--recover" in argv:
-        dstImages = CollectFiles("WebPs", ("webp"))
-        
-        for i in range(len(dstImages)):
-            dstImages[i] = GetFilename(dstImages[i])
-        
-        toRemove = []
-        
-        for i in range(len(srcImages)):
-            
-            if GetFilename(srcImages[i]) in dstImages:
-                toRemove.append(srcImages[i])
-        
-        for img in toRemove:
-            try:
-                srcImages.remove(img)
-            except ValueError: pass
-        
-        if len(srcImages) == 0:
-            stdout.write("All images converted successfully.\n")
-        else:
-            stdout.write(f"Found {len(srcImages)} images that failed to convert\n")
+        RecoverPt1()
     else:
         if len(srcImages) == 0:
             stdout.write("No images found in cwd.\n")
@@ -397,16 +415,14 @@ if __name__ == '__main__':
     for i in range(len(srcImages)):
         threadImages[i % NUM_THREADS].append(srcImages[i])
         
-    MakeDir('WebPs')
-    MakeDir('xmpdata_tmp')
+    mkdir_wrapper('WebPs')
+    mkdir_wrapper('xmpdata_tmp')
 
     threadPool = [Thread(target=ConversionWorker, args=[threadImages[i]], name=f'Thread{i}') for i in range(NUM_THREADS)]
 
     for thread in threadPool:
         thread.start()
-    
-    LogTail()
-    
+        
     while G_threadsDone != NUM_THREADS:
         stdout.write(f"\x1b[1K\rConverting Image ({G_imagesDone}/{len(srcImages)})")
         sleep(0.1)
@@ -418,46 +434,9 @@ if __name__ == '__main__':
     
     # Recovery Part II - metadata
     if "--recover" in argv:
-        outFiles = CollectFiles("WebPs", ("webp"))
-        fuckedMD = []
-        G_imagesDone = 0
-        for dstImg in outFiles:
-            G_imagesDone += 1
-            stdout.write(f"\x1b[1K\r Checking image metadata... ({G_imagesDone}/{len(outFiles)})")
-            if not CheckIfMetadata(dstImg):
-                fuckedMD.append(dstImg)
-        
-        if len(fuckedMD) != 0:
-            stdout.write("\nThere is no metadata to recover.")
-            shutil.rmtree('xmpdata_tmp')
-            exit()
-        
-        if "--no-ignore-webp" in argv:
-            srcFiles = CollectFiles(".", ("png", "webp", "tiff", "tif", "tga"))
-        else:
-            srcFiles = CollectFiles(".", ("png", "tiff", "tif", "tga"))
-        
-        G_imagesDone = 0
-        for img in fuckedMD:
-            for i in range(len(srcFiles)):
-                G_imagesDone += 1
-                stdout.write(f"\x1b[1K\r Checking image metadata... ({G_imagesDone}/{len(fuckedMD)})")
-                if GetFilename(img) != GetFilename(srcFiles[i]): continue
-                if not CheckIfMetadata(srcFiles[i]):
-                    fuckedMD.remove(img)
-        
-        if len(fuckedMD) == 0:
-            stdout.write("\nThere is no metadata to recover.")
-            shutil.rmtree('xmpdata_tmp')
-            exit()
-        
-        doneCount = 0
-        for outImage in fuckedMD:
-            for i in range(len(srcFiles)):
-                if GetFilename(outImage) != GetFilename(srcFiles[i]): continue
-                inImage = srcFiles[i]
-            doneCount += 1
-            stdout.write(f"\x1b[1K\rTransferring metadata...({doneCount}/{len(fuckedMD)})")
-            TransferMetadata(inImage, outImage)
+        RecoverPt2()
+    
+    if G_AutoReplace:
+        AutoReplace()
 
     shutil.rmtree('xmpdata_tmp')

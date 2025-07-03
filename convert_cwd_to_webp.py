@@ -26,7 +26,8 @@ OPTIONS:
     --mdtest <IMAGE> - Tests if provided image has extra metadata
     --(no-)force(-no)-metadata - Forces metadata to be transferred (or not to be), skipping check
     --remove-original - removes original image and moves converted image into place (only -s)
-    --no-replace-originals - leaves all webps in the webps folder and leaves all original files alone (without -s)
+    --autoreplace - replaces original files with webps (checks if errors occurred first and prints them to stdout if any) (without -s)
+    --no-replace-originals (NI) - leaves all webps in the webps folder and leaves all original files alone (without -s)
     --nolog - doesn't make log files\n"""
 
 DEFAULT_TAGS = ['ExifTool Version Number',

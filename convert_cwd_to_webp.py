@@ -26,8 +26,7 @@ OPTIONS:
     --mdtest <IMAGE> - Tests if provided image has extra metadata
     --(no-)force(-no)-metadata - Forces metadata to be transferred (or not to be), skipping check
     --remove-original - removes original image and moves converted image into place (only -s)
-    --autoreplace - replaces original files with webps (checks if errors occurred first and prints them to stdout if any) (without -s)
-    --no-replace-originals (NI) - leaves all webps in the webps folder and leaves all original files alone (without -s)
+    --no-replace-originals - leaves all webps in the webps folder and leaves all original files alone (without -s)
     --nolog - doesn't make log files\n"""
 
 DEFAULT_TAGS = ['ExifTool Version Number',
@@ -230,8 +229,8 @@ def ProcessCmdOptions():
     if "--force-no-metadata" in argv:
         G_forceMD = False
 
-    if "--autoreplace":
-        G_AutoReplace = True
+    if "--no-replace-originals":
+        G_AutoReplace = False
     
     if "--mdtest" in argv:
         MetadataCheck(argv[2])
@@ -361,6 +360,7 @@ def RecoverPt2() -> None:
         TransferMetadata(inImage, outImage)
 
 def AutoReplace() -> None:
+    # open and split logfile
     logfileText = open(f"{LOGGING_DIR}{os.sep}{current_thread().name}.log", "r").read()        
     logfileParsed = logfileText.split("\n")
     for i in range(len(logfileParsed)):
@@ -372,6 +372,7 @@ def AutoReplace() -> None:
     current_image: str = ""
     current_line: int = 0
     
+    # parse file and sort files into "good" and "bad"
     while current_line < len(logfileParsed):
         if logfileParsed[current_line][0] == "converting":
             current_image = logfileParsed[current_line][1]
@@ -406,14 +407,17 @@ def AutoReplace() -> None:
                 good_images.append(current_image)
                 current_image = ""
                 current_line += 1
-            
-                
+    
+    # remove originals and move webps
+    send2trash(good_images)
+    for image in good_images:
+        shutil.move(f"WebPs{os.sep}{GetFilename(image)}.webp", f"{GetFilename(image)}.webp")
 
 NUM_THREADS: int = 0
 LOGGING_DIR: str = ""
 
 G_forceMD: bool|None = None
-G_AutoReplace: bool = False
+G_AutoReplace: bool = True
 G_collectFormats: tuple[str] = ("png", "tiff", "tif", "tga")
 G_imagesDone: int = 0
 G_threadsDone: int = 0
@@ -423,6 +427,8 @@ if __name__ == '__main__':
     ProcessCmdOptions()
     
     srcImages = CollectFiles(".", G_collectFormats)
+    if len(srcImages) < NUM_THREADS: NUM_THREADS = len(srcImages)
+    
     
     if "--list-md" in argv:
         PrintImageData(srcImages, True)
@@ -477,3 +483,7 @@ if __name__ == '__main__':
         RecoverPt2()
 
     shutil.rmtree('xmpdata_tmp')
+    try:
+        os.rmdir("WebPs")
+    except OSError:
+        pass

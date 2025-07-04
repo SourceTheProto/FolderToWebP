@@ -106,7 +106,7 @@ def RunShellsync(args: list[str], hideStdout: bool) -> int:
     return ret.returncode
 
 def CheckIfMetadata(filename: str) -> bool:
-    WriteLog("hasMetadata,")
+    WriteLog("hasMetadata|")
     
     global G_forceMD
     if G_forceMD == True:
@@ -160,6 +160,10 @@ def ConversionWorker(images: list):
     global G_threadsDone
     for inFile in images:
         ConvertSingleImage(inFile)
+    
+    if G_AutoReplace:
+        AutoReplace()
+        
     G_threadsDone += 1
 
 def ConvertSingleImage(image: str) -> str: 
@@ -170,7 +174,7 @@ def ConvertSingleImage(image: str) -> str:
     else: hideStdout: bool = False
     
     # Convert image
-    WriteLog(f"converting,{image},")
+    WriteLog(f"converting|{image}|")
     ret = RunShellsync(["cwebp", "-lossless", "-metadata", "icc", "-mt", "-z", "9", "-alpha_filter", "best", "-progress", "-exact", image, "-o", outFile], hideStdout)
     if ret != 0:
         WriteLog("FAIL\n")
@@ -187,7 +191,7 @@ def TransferMetadata(image: str, outFile: str):
     xmpFile = "xmpdata_tmp" + os.sep + GetFilename(image) + ".xmp"
     
     # transferring old EXIF data to tmp XMP file
-    WriteLog("getMetadata,")
+    WriteLog("getMetadata|")
     ret = RunShellsync(["exiftool", "-u", "-U", "-P", "-a", "-z", "-tagsFromFile", image, xmpFile], True)
     if ret != 0:
         WriteLog("FAIL\n")
@@ -195,7 +199,7 @@ def TransferMetadata(image: str, outFile: str):
     WriteLog("SUCCESS\n")
     
     # transferring tmp XMP data back to converted image
-    WriteLog("writeMetadata,")
+    WriteLog("writeMetadata|")
     ret = RunShellsync(["webpmux", "-set", "xmp", xmpFile, outFile, "-o", outFile], True)
     if ret != 0:
         WriteLog("FAIL\n")
@@ -357,18 +361,53 @@ def RecoverPt2() -> None:
         TransferMetadata(inImage, outImage)
 
 def AutoReplace() -> None:
-    logFiles = CollectFiles(LOGGING_DIR, ("log"))
-    combinedLogFile = open(f"{LOGGING_DIR}{os.sep}combinedLog.txt", "a")
+    logfileText = open(f"{LOGGING_DIR}{os.sep}{current_thread().name}.log", "r").read()        
+    logfileParsed = logfileText.split("\n")
+    for i in range(len(logfileParsed)):
+        logfileParsed[i] = logfileParsed[i].split("|")
+    logfileParsed.remove([''])
     
-    for logfilename in logFiles:
-        with open(logfilename, "r") as logfile:
-            combinedLogFile.write(logfile.read())
+    failed_images: list[str] = []
+    good_images: list[str] = []
+    current_image: str = ""
+    current_line: int = 0
     
-    combinedLogFile.close()
-    combinedLogFile = open(f"{LOGGING_DIR}{os.sep}combinedLog.txt", "r")
-    
-    # Parse file for errors
+    while current_line < len(logfileParsed):
+        if logfileParsed[current_line][0] == "converting":
+            current_image = logfileParsed[current_line][1]
+            if logfileParsed[current_line][2] == "SUCCESS":
+                current_line += 1
+            else:
+                failed_images.append([current_image, "failed to convert"])
+                current_image = ""
+                current_line += 1
         
+        if logfileParsed[current_line][0] == "hasMetadata":
+            if logfileParsed[current_line][1] == "FALSE":
+                good_images.append(current_image)
+                current_image = ""
+                current_line += 1
+            else:
+                current_line += 1
+        
+        if logfileParsed[current_line][0] == "getMetadata":
+            if logfileParsed[current_line][1] == "FAIL":
+                failed_images.append([current_image, "failed to get metadata"])
+                current_image = ""
+                current_line += 1
+            else:
+                current_line += 1
+        if logfileParsed[current_line][0] == "writeMetadata":
+            if logfileParsed[current_line][1] == "FAIL":
+                failed_images.append([current_image, "failed to write metadata"])
+                current_image = ""
+                current_line += 1
+            else:
+                good_images.append(current_image)
+                current_image = ""
+                current_line += 1
+            
+                
 
 NUM_THREADS: int = 0
 LOGGING_DIR: str = ""
@@ -436,8 +475,5 @@ if __name__ == '__main__':
     # Recovery Part II - metadata
     if "--recover" in argv:
         RecoverPt2()
-    
-    if G_AutoReplace:
-        AutoReplace()
 
     shutil.rmtree('xmpdata_tmp')

@@ -89,7 +89,7 @@ def WriteLog(logString: str) -> None:
 # metadata was determined to be "extra". Can be
 # used to check other images to see if they
 # would get their metadata transfered.
-def PrintImageData(imgList: list, checkMD: bool) -> None:
+def PrintImageData(imgList: list[str], checkMD: bool) -> None:
     for img in imgList:
         stdout.write(f"\t{img}")
         if (checkMD) and CheckIfMetadata(img):
@@ -229,7 +229,7 @@ def ProcessCmdOptions():
     if "--force-no-metadata" in argv:
         G_forceMD = False
 
-    if "--no-replace-originals":
+    if "--no-replace-originals" in argv:
         G_AutoReplace = False
     
     if "--mdtest" in argv:
@@ -367,11 +367,11 @@ def AutoReplace() -> None:
         logfileParsed[i] = logfileParsed[i].split("|")
     logfileParsed.remove([''])
     
-    failed_images: list[str] = []
     good_images: list[str] = []
     current_image: str = ""
     current_line: int = 0
     
+    global G_logQueue
     # parse file and sort files into "good" and "bad"
     while current_line < len(logfileParsed):
         if logfileParsed[current_line][0] == "converting":
@@ -379,28 +379,31 @@ def AutoReplace() -> None:
             if logfileParsed[current_line][2] == "SUCCESS":
                 current_line += 1
             else:
-                failed_images.append([current_image, "failed to convert"])
+                G_logQueue.put(f"{current_image} failed to convert")
                 current_image = ""
                 current_line += 1
+                if current_line >= len(logfileParsed): break
         
         if logfileParsed[current_line][0] == "hasMetadata":
             if logfileParsed[current_line][1] == "FALSE":
                 good_images.append(current_image)
                 current_image = ""
                 current_line += 1
+                if current_line >= len(logfileParsed): break
             else:
                 current_line += 1
         
         if logfileParsed[current_line][0] == "getMetadata":
             if logfileParsed[current_line][1] == "FAIL":
-                failed_images.append([current_image, "failed to get metadata"])
+                G_logQueue.put(f"{current_image} failed to get metadata")
                 current_image = ""
                 current_line += 1
+                if current_line >= len(logfileParsed): break
             else:
                 current_line += 1
         if logfileParsed[current_line][0] == "writeMetadata":
             if logfileParsed[current_line][1] == "FAIL":
-                failed_images.append([current_image, "failed to write metadata"])
+                G_logQueue.put(f"{current_image} failed to write metadata")
                 current_image = ""
                 current_line += 1
             else:
@@ -421,6 +424,7 @@ G_AutoReplace: bool = True
 G_collectFormats: tuple[str] = ("png", "tiff", "tif", "tga")
 G_imagesDone: int = 0
 G_threadsDone: int = 0
+G_logQueue: SimpleQueue[str] = SimpleQueue()
 
 if __name__ == '__main__':
     
@@ -470,10 +474,12 @@ if __name__ == '__main__':
         thread.start()
         
     while G_threadsDone != NUM_THREADS:
-        stdout.write(f"\x1b[1K\rConverting Image ({G_imagesDone}/{len(srcImages)})")
+        while not G_logQueue.empty():
+            stdout.write(f"{G_logQueue.get()}\x1b[0K\n")
+            sleep(0.1)
+        stdout.write(f"Converting Image ({G_imagesDone}/{len(srcImages)})\x1b[0K\r")
         sleep(0.1)
     stdout.write(f"\x1b[1K\rConverting Image ({len(srcImages)}/{len(srcImages)})\n")
-        
 
     for thread in threadPool:
         thread.join()
@@ -482,7 +488,11 @@ if __name__ == '__main__':
     if "--recover" in argv:
         RecoverPt2()
 
-    shutil.rmtree('xmpdata_tmp')
+    try:
+        shutil.rmtree('xmpdata_tmp')
+    except OSError:
+        pass
+    
     try:
         os.rmdir("WebPs")
     except OSError:
